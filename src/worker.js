@@ -11,26 +11,30 @@ async function actor(req,db){const token=(req.headers.get('Authorization')||'').
 const audit=(db,a,action,entity,id,details)=>db.prepare('INSERT INTO audit_log(actor_id,action,entity,entity_id,details) VALUES(?,?,?,?,?)').bind(a?.id||null,action,entity,id||null,JSON.stringify(details||{})).run();
 async function openPeriods(db){const rows=(await db.prepare('SELECT * FROM periods WHERE closed_at IS NULL').all()).results;return {day:rows.find(x=>x.kind==='day')||null,month:rows.find(x=>x.kind==='month')||null}}
 async function adjust(db,productId,delta,reason,a,saleId=null){const p=await db.prepare('SELECT * FROM products WHERE id=?').bind(productId).first();if(!p)throw Error('الصنف غير موجود');await db.batch([db.prepare('UPDATE products SET quantity=quantity+? WHERE id=?').bind(delta,productId),db.prepare('INSERT INTO stock_moves(product_id,delta,before_quantity,after_quantity,reason,actor_id,sale_id) VALUES(?,?,?,?,?,?,?)').bind(productId,delta,p.quantity,p.quantity+delta,reason,a.id,saleId)]);}
-export default {async fetch(req,env){const url=new URL(req.url),path=url.pathname,db=env.DB;
+export default {async fetch(req,env){
+const url=new URL(req.url),path=url.pathname,db=env.DB;
 if(!path.startsWith('/api/'))return env.ASSETS.fetch(req);
 if(!db)return fail('قاعدة D1 غير مربوطة بالـ Worker',500);
 try{
 if(path==='/api/health')return json({ok:true,service:'جراب واسكرينة'});
 if(path==='/api/setup/status'){const n=await db.prepare('SELECT COUNT(*) n FROM users').first();return json({ok:true,needs_setup:n.n===0})}
+
 if(path==='/api/setup'&&req.method==='POST'){
-  const n=await db.prepare('SELECT COUNT(*) n FROM users').first();
-  if(n.n)return fail('تم إعداد المدير بالفعل',403);
-  const b=await body(req);
-  if(!b.username||!b.password||b.password.length<12)return fail('اكتب اسم مستخدم وكلمة مرور 12 حرف على الأقل');
-  const salt=random();
-  await db.prepare('INSERT INTO users(username,display_name,role,salt,password_hash) VALUES(?,?,?,?,?)')
-    .bind(b.username,b.display_name||'المدير','manager',salt,await passwordHash(b.password,salt)).run();
-  return json({ok:true});
+const n=await db.prepare('SELECT COUNT(*) n FROM users').first();
+if(n.n)return fail('تم إعداد المدير بالفعل',403);
+const b=await body(req);
+if(!b.username||!b.password||b.password.length<12)return fail('اكتب اسم مستخدم وكلمة مرور 12 حرف على الأقل');
+const salt=random();
+await db.prepare('INSERT INTO users(username,name,display_name,role,salt,password_hash) VALUES(?,?,?,?,?,?)')
+.bind(b.username,b.display_name||'المدير',b.display_name||'المدير','manager',salt,await passwordHash(b.password,salt)).run();
+return json({ok:true});
 }
+
 if(path==='/api/login'&&req.method==='POST'){const b=await body(req);const u=await db.prepare('SELECT * FROM users WHERE username=? AND active=1').bind(b.username||'').first();if(!u||await passwordHash(b.password||'',u.salt)!==u.password_hash)return fail('بيانات الدخول غير صحيحة',401);const token=random();await db.prepare("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,datetime('now','+7 days'))").bind(await hash(token),u.id).run();return json({ok:true,token,user:{id:u.id,username:u.username,display_name:u.display_name,role:u.role}})}
-const a=await actor(req,db);if(!a)return fail('يجب تسجيل الدخول',401);const manager=a.role==='manager';
+const a=await actor(req,db);if(!a)return fail('يجب تسجيل الدخول',401);
+const manager=a.role==='manager';
 if(path==='/api/me')return json({ok:true,user:a});
-if(path==='/api/logout'&&req.method==='POST'){const token=req.headers.get('Authorization').replace(/^Bearer /i,'');await db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await hash(token)).run();return json({ok:true})}
+if(path==='/api/logout'&&req.method==='POST'){const token=(req.headers.get('Authorization')||'').replace(/^Bearer /i,'');await db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await hash(token)).run();return json({ok:true})}
 if(path==='/api/categories')return json({ok:true,items:(await db.prepare('SELECT * FROM categories ORDER BY id').all()).results});
 if(path==='/api/periods'&&req.method==='GET'){const p=await openPeriods(db);return json({ok:true,...p})}
 if(path==='/api/periods'&&req.method==='POST'){const b=await body(req),kind=b.kind,action=b.action;if(!['day','month'].includes(kind)||!['open','close'].includes(action))return fail('طلب غير صحيح');const p=await openPeriods(db);if(action==='open'){if(p[kind])return fail('الفترة مفتوحة بالفعل');if(kind==='day'&&!p.month)return fail('افتح الشهر أولاً');const r=await db.prepare('INSERT INTO periods(kind,label,opened_by) VALUES(?,?,?)').bind(kind,String(b.label||new Date().toLocaleDateString('ar-EG',{timeZone:'Africa/Cairo'})),a.id).run();await audit(db,a,'open',kind,r.meta.last_row_id,{});}else{if(!p[kind])return fail('الفترة مغلقة بالفعل');if(kind==='month'&&p.day)return fail('اقفل اليوم أولاً');await db.prepare('UPDATE periods SET closed_at=CURRENT_TIMESTAMP,closed_by=? WHERE id=?').bind(a.id,p[kind].id).run();await audit(db,a,'close',kind,p[kind].id,{})}return json({ok:true,...await openPeriods(db)})}
@@ -40,11 +44,12 @@ if(path==='/api/stock/adjust'&&req.method==='POST'){if(!manager)return fail('ل�
 if(path==='/api/stock/moves'){if(!manager)return fail('للمدير فقط',403);return json({ok:true,items:(await db.prepare('SELECT m.*,p.name product_name,u.display_name actor FROM stock_moves m JOIN products p ON p.id=m.product_id LEFT JOIN users u ON u.id=m.actor_id ORDER BY m.id DESC LIMIT 500').all()).results})}
 if(path==='/api/sales'&&req.method==='POST'){const b=await body(req),p=await openPeriods(db),qty=Number(b.quantity),amount=Number(b.amount),name=String(b.product_name||'').trim();if(!p.day||!p.month)return fail('افتح اليوم والشهر أولاً');if(!name||!Number.isSafeInteger(qty)||qty<=0||!Number.isFinite(amount)||amount<0)return fail('بيانات البيع غير صحيحة');const product=b.product_id?await db.prepare('SELECT * FROM products WHERE id=?').bind(b.product_id).first():null;if(b.product_id&&!product)return fail('الصنف غير موجود');const r=await db.prepare('INSERT INTO sales(day_id,month_id,product_id,product_name,quantity,amount,user_id) VALUES(?,?,?,?,?,?,?)').bind(p.day.id,p.month.id,product?.id||null,product?.name||name,qty,amount,a.id).run();if(product)await adjust(db,product.id,-qty,'بيع',a,r.meta.last_row_id);await audit(db,a,'create','sales',r.meta.last_row_id,{name,qty,amount});return json({ok:true,id:r.meta.last_row_id})}
 if(path==='/api/sales'&&req.method==='GET'){const p=await openPeriods(db);const mode=url.searchParams.get('mode')||'day';if(!manager&&mode!=='day')return fail('غير مسموح',403);let where='',params=[];if(mode==='day'){where='s.day_id=?';params=[p.day?.id||-1]}else if(mode==='month'){where='s.month_id=?';params=[p.month?.id||-1]}else if(mode==='archive'){where='1=1'}else return fail('نوع تقرير غير صحيح');const query=`SELECT s.*,u.display_name worker FROM sales s JOIN users u ON u.id=s.user_id WHERE ${where} AND s.deleted_at IS NULL ORDER BY s.id DESC LIMIT 2000`;const items=(await db.prepare(query).bind(...params).all()).results;return json({ok:true,items,total:items.reduce((n,x)=>n+x.amount,0)})}
-const sm=path.match(/^\/api\/sales\/(\d+)$/);if(sm&&['PUT','DELETE'].includes(req.method)){if(!manager)return fail('للمدير فقط',403);const s=await db.prepare('SELECT * FROM sales WHERE id=? AND deleted_at IS NULL').bind(Number(sm[1])).first();if(!s)return fail('البيع غير موجود',404);if(s.product_id)await adjust(db,s.product_id,s.quantity,'إلغاء أثر البيع قبل التعديل',a,s.id);if(req.method==='DELETE'){await db.prepare('UPDATE sales SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').bind(s.id).run();await audit(db,a,'delete','sales',s.id,s);return json({ok:true})}const b=await body(req),qty=Number(b.quantity),amount=Number(b.amount);if(!Number.isSafeInteger(qty)||qty<=0||!Number.isFinite(amount)||amount<0)return fail('بيانات غير صحيحة');await db.prepare('UPDATE sales SET quantity=?,amount=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(qty,amount,s.id).run();if(s.product_id)await adjust(db,s.product_id,-qty,'تعديل بيع',a,s.id);await audit(db,a,'edit','sales',s.id,{before:s,after:{qty,amount}});return json({ok:true})}
+const sm=path.match(/^\/api\/sales\/(\d+)$/);
+if(sm&&['PUT','DELETE'].includes(req.method)){if(!manager)return fail('للمدير فقط',403);const s=await db.prepare('SELECT * FROM sales WHERE id=? AND deleted_at IS NULL').bind(Number(sm[1])).first();if(!s)return fail('البيع غير موجود',404);if(s.product_id)await adjust(db,s.product_id,s.quantity,'إلغاء أثر البيع قبل التعديل',a,s.id);if(req.method==='DELETE'){await db.prepare('UPDATE sales SET deleted_at=CURRENT_TIMESTAMP WHERE id=?').bind(s.id).run();await audit(db,a,'delete','sales',s.id,s);return json({ok:true})}const b=await body(req),qty=Number(b.quantity),amount=Number(b.amount);if(!Number.isSafeInteger(qty)||qty<=0||!Number.isFinite(amount)||amount<0)return fail('بيانات غير صحيحة');await db.prepare('UPDATE sales SET quantity=?,amount=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(qty,amount,s.id).run();if(s.product_id)await adjust(db,s.product_id,-qty,'تعديل بيع',a,s.id);await audit(db,a,'edit','sales',s.id,{before:s,after:{qty,amount}});return json({ok:true})}
 if(path==='/api/reports'&&req.method==='GET'){if(!manager)return fail('للمدير فقط',403);const periods=(await db.prepare('SELECT p.*,u.display_name opened_by_name FROM periods p LEFT JOIN users u ON u.id=p.opened_by ORDER BY p.id DESC LIMIT 200').all()).results;const workers=(await db.prepare('SELECT u.id,u.display_name,COUNT(s.id) sales_count,COALESCE(SUM(s.amount),0) total FROM users u LEFT JOIN sales s ON s.user_id=u.id AND s.deleted_at IS NULL GROUP BY u.id ORDER BY total DESC').all()).results;return json({ok:true,periods,workers})}
 if(path==='/api/users'&&req.method==='GET'){if(!manager)return fail('للمدير فقط',403);return json({ok:true,items:(await db.prepare('SELECT id,username,display_name,role,active FROM users ORDER BY id').all()).results})}
-if(path==='/api/users'&&req.method==='POST'){if(!manager)return fail('للمدير فقط',403);const b=await body(req);if(!b.username||!b.password||b.password.length<12||!['worker','manager'].includes(b.role))return fail('بيانات غير صحيحة، كلمة المرور 12 حرف على الأقل');const salt=random();await db.prepare('INSERT INTO users(username,display_name,role,salt,password_hash) VALUES(?,?,?,?,?)').bind(b.username,b.display_name||b.username,b.role,salt,await passwordHash(b.password,salt)).run();await audit(db,a,'create','users',null,{username:b.username,role:b.role});return json({ok:true})}
+if(path==='/api/users'&&req.method==='POST'){if(!manager)return fail('للمدير فقط',403);const b=await body(req);if(!b.username||!b.password||b.password.length<12||!['worker','manager'].includes(b.role))return fail('بيانات غير صحيحة، كلمة المرور 12 حرف على الأقل');const salt=random();await db.prepare('INSERT INTO users(username,name,display_name,role,salt,password_hash) VALUES(?,?,?,?,?,?)').bind(b.username,b.display_name||b.username,b.display_name||b.username,b.role,salt,await passwordHash(b.password,salt)).run();await audit(db,a,'create','users',null,{username:b.username,role:b.role});return json({ok:true})}
 if(path==='/api/audit'){if(!manager)return fail('للمدير فقط',403);return json({ok:true,items:(await db.prepare('SELECT l.*,u.display_name actor FROM audit_log l LEFT JOIN users u ON u.id=l.actor_id ORDER BY l.id DESC LIMIT 300').all()).results})}
-return fail('المسار غير موجود',404)
+return fail('المسار غير موجود',404);
 }catch(e){return fail('تعذر تنفيذ العملية: '+e.message,500)}
 }};
