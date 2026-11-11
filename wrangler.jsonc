@@ -1,0 +1,7 @@
+{
+  "name": "gerab-w-escreena-api",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "assets": {"directory": "./public", "binding": "ASSETS", "run_worker_first": ["/api/*"]},
+  "d1_databases": [{"binding":"DB","database_name":"gerab-w-escreena-db","database_id":"c2e0a062-a3fc-461c-ad40-a699a4634563"}]
+}
