@@ -10,3 +10,14 @@ CREATE INDEX IF NOT EXISTS sales_day_idx ON sales(day_id,deleted_at);
 CREATE INDEX IF NOT EXISTS sales_month_idx ON sales(month_id,deleted_at);
 CREATE TABLE IF NOT EXISTS stock_moves (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL REFERENCES products(id), delta INTEGER NOT NULL, before_quantity INTEGER NOT NULL, after_quantity INTEGER NOT NULL, reason TEXT NOT NULL, actor_id INTEGER REFERENCES users(id), sale_id INTEGER REFERENCES sales(id), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id INTEGER REFERENCES users(id), action TEXT NOT NULL, entity TEXT NOT NULL, entity_id INTEGER, details TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS expenses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day_id INTEGER NOT NULL REFERENCES periods(id),
+  month_id INTEGER NOT NULL REFERENCES periods(id),
+  amount REAL NOT NULL CHECK(amount > 0),
+  reason TEXT NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted_at TEXT,
+  deleted_by INTEGER REFERENCES users(id)
+);
