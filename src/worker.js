@@ -92,6 +92,44 @@ if(path==='/api/reports'&&req.method==='GET'){if(!manager)return fail('للمد�
 if(path==='/api/users'&&req.method==='GET'){if(!manager)return fail('للمدير فقط',403);return json({ok:true,items:(await db.prepare('SELECT id,username,display_name,role,active FROM users ORDER BY id').all()).results})}
 if(path==='/api/users'&&req.method==='POST'){if(!manager)return fail('للمدير فقط',403);const b=await body(req);if(!b.username||!b.password||b.password.length<12||!['worker','manager'].includes(b.role))return fail('بيانات غير صحيحة، كلمة المرور 12 حرف على الأقل');const salt=random();await db.prepare('INSERT INTO users(username,name,display_name,role,salt,password_hash) VALUES(?,?,?,?,?,?)').bind(b.username,b.display_name||b.username,b.display_name||b.username,b.role,salt,await passwordHash(b.password,salt)).run();await audit(db,a,'create','users',null,{username:b.username,role:b.role});return json({ok:true})}
 if(path==='/api/audit'){if(!manager)return fail('للمدير فقط',403);return json({ok:true,items:(await db.prepare('SELECT l.*,u.display_name actor FROM audit_log l LEFT JOIN users u ON u.id=l.actor_id ORDER BY l.id DESC LIMIT 300').all()).results})}
-return fail('المسار غير موجود',404);
+if(path==='/api/expenses'&&req.method==='POST'){
+  const b=await body(req),p=await openPeriods(db);
+  const amount=Number(b.amount),reason=String(b.reason||'').trim();
+  if(!p.day||!p.month)return fail('افتح اليوم والشهر أولاً');
+  if(!Number.isFinite(amount)||amount<=0||!reason)return fail('اكتب مبلغ المصروف وسببه');
+  const r=await db.prepare(
+    'INSERT INTO expenses(day_id,month_id,amount,reason,user_id) VALUES(?,?,?,?,?)'
+  ).bind(p.day.id,p.month.id,amount,reason,a.id).run();
+  await audit(db,a,'create','expenses',r.meta.last_row_id,{amount,reason});
+  return json({ok:true,id:r.meta.last_row_id});
+}
+
+if(path==='/api/expenses'&&req.method==='GET'){
+  const p=await openPeriods(db);
+  const mode=url.searchParams.get('mode')||'day';
+  if(mode==='month'&&!manager)return fail('للمدير فقط',403);
+  const period=mode==='month'?p.month:p.day;
+  if(!period)return json({ok:true,items:[]});
+  const column=mode==='month'?'month_id':'day_id';
+  const items=(await db.prepare(
+    `SELECT e.*,u.display_name AS worker_name FROM expenses e
+     LEFT JOIN users u ON u.id=e.user_id
+     WHERE e.${column}=? AND e.deleted_at IS NULL
+     ORDER BY e.id DESC`
+  ).bind(period.id).all()).results;
+  return json({ok:true,items});
+}
+
+const em=path.match(/^\/api\/expenses\/(\d+)$/);
+if(em&&req.method==='DELETE'){
+  if(!manager)return fail('الحذف للمدير فقط',403);
+  const r=await db.prepare(
+    'UPDATE expenses SET deleted_at=CURRENT_TIMESTAMP,deleted_by=? WHERE id=? AND deleted_at IS NULL'
+  ).bind(a.id,Number(em[1])).run();
+  if(!r.meta.changes)return fail('المصروف غير موجود',404);
+  await audit(db,a,'delete','expenses',Number(em[1]),{});
+  return json({ok:true});
+}
+  return fail('المسار غير موجود',404);
 }catch(e){return fail('تعذر تنفيذ العملية: '+e.message,500)}
 }};
