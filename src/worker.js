@@ -9,7 +9,17 @@ async function passwordHash(pass,salt){return hash(`${salt}:${pass}`)}
 async function body(req){try{return await req.json()}catch{return {}}}
 async function actor(req,db){const token=(req.headers.get('Authorization')||'').replace(/^Bearer /i,'');if(!token)return null;return db.prepare("SELECT u.id,u.username,u.display_name,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at > datetime('now') AND u.active=1").bind(await hash(token)).first()}
 const audit=(db,a,action,entity,id,details)=>db.prepare('INSERT INTO audit_log(actor_id,action,entity,entity_id,details) VALUES(?,?,?,?,?)').bind(a?.id||null,action,entity,id||null,JSON.stringify(details||{})).run();
-async function openPeriods(db){const rows=(await db.prepare('SELECT * FROM periods WHERE closed_at IS NULL').all()).results;return {day:rows.find(x=>x.kind==='day')||null,month:rows.find(x=>x.kind==='month')||null}}
+async function openPeriods(db){
+  const rows=(await db.prepare('SELECT * FROM periods WHERE closed_at IS NULL').all()).results;
+  const day=rows.find(x=>x.kind==='day')||null;
+  const month=rows.find(x=>x.kind==='month')||null;
+  const workDay=day?await db.prepare('SELECT id FROM work_days WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1').first():null;
+  const workMonth=month?await db.prepare('SELECT id FROM work_months WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1').first():null;
+  return {
+    day:day&&workDay?{...day,period_id:day.id,id:workDay.id}:null,
+   month:month&&workMonth?{...month,period_id:month.id,id:workMonth.id}:null
+  };
+}
 async function adjust(db,productId,delta,reason,a,saleId=null){const p=await db.prepare('SELECT * FROM products WHERE id=?').bind(productId).first();if(!p)throw Error('الصنف غير موجود');await db.batch([db.prepare('UPDATE products SET quantity=quantity+? WHERE id=?').bind(delta,productId),db.prepare('INSERT INTO stock_moves(product_id,delta,before_quantity,after_quantity,reason,actor_id,sale_id) VALUES(?,?,?,?,?,?,?)').bind(productId,delta,p.quantity,p.quantity+delta,reason,a.id,saleId)]);}
 export default {async fetch(req,env){
 const url=new URL(req.url),path=url.pathname,db=env.DB;
@@ -37,7 +47,39 @@ if(path==='/api/me')return json({ok:true,user:a});
 if(path==='/api/logout'&&req.method==='POST'){const token=(req.headers.get('Authorization')||'').replace(/^Bearer /i,'');await db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await hash(token)).run();return json({ok:true})}
 if(path==='/api/categories')return json({ok:true,items:(await db.prepare('SELECT * FROM categories ORDER BY id').all()).results});
 if(path==='/api/periods'&&req.method==='GET'){const p=await openPeriods(db);return json({ok:true,...p})}
-if(path==='/api/periods'&&req.method==='POST'){const b=await body(req),kind=b.kind,action=b.action;if(!['day','month'].includes(kind)||!['open','close'].includes(action))return fail('طلب غير صحيح');const p=await openPeriods(db);if(action==='open'){if(p[kind])return fail('الفترة مفتوحة بالفعل');if(kind==='day'&&!p.month)return fail('افتح الشهر أولاً');const r=await db.prepare('INSERT INTO periods(kind,label,opened_by) VALUES(?,?,?)').bind(kind,String(b.label||new Date().toLocaleDateString('ar-EG',{timeZone:'Africa/Cairo'})),a.id).run();await audit(db,a,'open',kind,r.meta.last_row_id,{});}else{if(!p[kind])return fail('الفترة مغلقة بالفعل');if(kind==='month'&&p.day)return fail('اقفل اليوم أولاً');await db.prepare('UPDATE periods SET closed_at=CURRENT_TIMESTAMP,closed_by=? WHERE id=?').bind(a.id,p[kind].id).run();await audit(db,a,'close',kind,p[kind].id,{})}return json({ok:true,...await openPeriods(db)})}
+
+if(path==='/api/periods'&&req.method==='POST'){
+  const b=await body(req),kind=b.kind,action=b.action;
+  if(!['day','month'].includes(kind)||!['open','close'].includes(action))return fail('طلب غير صحيح');
+  const p=await openPeriods(db);
+  const table=kind==='day'?'work_days':'work_months';
+
+  if(action==='open'){
+    if(p[kind])return fail('الفترة مفتوحة بالفعل');
+    if(kind==='day'&&!p.month)return fail('افتح الشهر أولاً');
+
+    const parts=new Intl.DateTimeFormat('en-GB',{
+      timeZone:'Africa/Cairo',year:'numeric',month:'2-digit',day:'2-digit'
+    }).formatToParts(new Date());
+    const get=k=>parts.find(x=>x.type===k).value;
+    const date=`${get('year')}-${get('month')}-${get('day')}`;
+    const name=kind==='day'?date:date.slice(0,7);
+    const label=String(b.label||new Date().toLocaleDateString('ar-EG',{timeZone:'Africa/Cairo'}));
+
+    await db.prepare(`INSERT INTO ${table}(name,opened_by) VALUES(?,?)`).bind(name,a.id).run();
+    const r=await db.prepare('INSERT INTO periods(kind,label,opened_by) VALUES(?,?,?)').bind(kind,label,a.id).run();
+    await audit(db,a,'open',kind,r.meta.last_row_id,{});
+  }else{
+    if(!p[kind])return fail('الفترة مقفولة بالفعل');
+    if(kind==='month'&&p.day)return fail('اقفل اليوم أولاً');
+
+    await db.prepare('UPDATE periods SET closed_at=CURRENT_TIMESTAMP,closed_by=? WHERE id=?').bind(a.id,p[kind].period_id||p[kind].id).run();
+    await db.prepare(`UPDATE ${table} SET closed_at=CURRENT_TIMESTAMP,closed_by=? WHERE id=?`).bind(a.id,p[kind].id).run();
+    await audit(db,a,'close',kind,p[kind].id,{});
+  }
+  return json({ok:true,...await openPeriods(db)});
+}
+
 if(path==='/api/products'&&req.method==='GET'){const q=url.searchParams.get('q')||'';return json({ok:true,items:(await db.prepare('SELECT p.*,c.name category FROM products p JOIN categories c ON c.id=p.category_id WHERE p.name LIKE ? ORDER BY c.id,p.name LIMIT 1000').bind('%'+q+'%').all()).results})}
 if(path==='/api/products/batch'&&req.method==='POST'){if(!manager)return fail('للمدير فقط',403);const b=await body(req);if(!Array.isArray(b.items)||!b.items.length||b.items.length>100)return fail('أرسل من 1 إلى 100 صنف');const changes=[];for(const item of b.items){const name=String(item.name||'').trim(),qty=Number(item.quantity),min=Number(item.min_quantity||0),cat=Number(item.category_id);if(!name||name.length>150||!Number.isSafeInteger(qty)||!Number.isSafeInteger(min)||min<0||![1,2,3].includes(cat))return fail('بيانات صنف غير صحيحة');let p=await db.prepare('SELECT * FROM products WHERE name=? AND category_id=?').bind(name,cat).first();if(!p){const r=await db.prepare('INSERT INTO products(name,category_id,quantity,min_quantity) VALUES(?,?,0,?)').bind(name,cat,min).run();p={id:r.meta.last_row_id}}else await db.prepare('UPDATE products SET min_quantity=? WHERE id=?').bind(min,p.id).run();await adjust(db,p.id,qty,'إضافة بضاعة',a);changes.push(name)}await audit(db,a,'stock_batch','products',null,{changes});return json({ok:true,count:changes.length})}
 if(path==='/api/stock/adjust'&&req.method==='POST'){if(!manager)return fail('للمدير فقط',403);const b=await body(req),p=await db.prepare('SELECT * FROM products WHERE id=?').bind(b.product_id).first();if(!p||!Number.isSafeInteger(Number(b.quantity)))return fail('بيانات غير صحيحة');await adjust(db,p.id,Number(b.quantity)-p.quantity,'جرد: '+String(b.reason||''),a);await audit(db,a,'stocktake','products',p.id,{from:p.quantity,to:Number(b.quantity)});return json({ok:true})}
