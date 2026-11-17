@@ -25,7 +25,43 @@ else if(k==='inventory')c.innerHTML=panel(`<h2>المخزون الحالي</h2><
 else if(k==='add')c.innerHTML=panel(`<h2>إضافة عدة أصناف دفعة واحدة</h2><p class="muted">كل سطر: اسم المنتج | الكمية المضافة | الحد الأدنى. الكميات تتجمع تلقائياً، والأسعار لا تُخزن في المخزون.</p><label>القسم</label>${catSelect('cat')}<label>الأصناف</label><textarea id="batch" placeholder="جراب سامسونج A15 - سادة | 10 | 5&#10;جراب سامسونج A15 - أشكال | 15 | 5"></textarea><p><button onclick="batchAdd()">حفظ كل البضاعة</button></p>`);
 else if(k==='moves'){const d=await api('stock/moves');c.innerHTML=panel(`<h2>حركة المخزون</h2>${table(['التاريخ','الصنف','التغير','قبل','بعد','السبب','المستخدم'],d.items.map(x=>tr([esc(x.created_at),esc(x.product_name),fmt(x.delta),fmt(x.before_quantity),fmt(x.after_quantity),esc(x.reason),esc(x.actor)])))}`)}
 
-else if(k==='expenses'){const d=await api('expenses?mode=day');const total=d.items.reduce((s,x)=>s+Number(x.amount),0);c.innerHTML=panel(`<h2>تسجيل مصروف جديد</h2><label>المبلغ بالجنيه</label><input id="expenseAmount" type="number" min="0.01" step="0.01"><label>سبب المصروف</label><input id="expenseReason" placeholder="مثلاً: كهرباء أو مواصلات"><p><button onclick="addExpense()">حفظ المصروف</button></p>`)+panel(`<h2>مصاريف اليوم: ${fmt(total)} جنيه</h2>${table(['التاريخ','المبلغ','السبب','المستخدم','إجراء'],d.items.map(x=>tr([esc(x.created_at),fmt(x.amount),esc(x.reason),esc(x.worker_name),manager()?`<button class="danger" onclick="deleteExpense(${x.id})">حذف</button>`:''])) )}`)}
+
+else if(k==='expenses'){
+  const d=await api('expenses?mode=day');
+  const history=manager()?await api('expenses/history'):null;
+  const total=d.items.reduce((s,x)=>s+Number(x.amount),0);
+  const groups={};
+  if(history){
+    history.items.forEach(x=>{
+      const key=String(x.day_id);
+      if(!groups[key])groups[key]={label:x.day_label||x.created_at.slice(0,10),items:[],total:0};
+      groups[key].items.push(x);
+      groups[key].total+=Number(x.amount);
+    });
+  }
+  c.innerHTML=
+    panel(`<h2>تسجيل مصروف جديد</h2>
+      <label>المبلغ بالجنيه</label>
+      <input id="expenseAmount" type="number" min="0.01" step="0.01">
+      <label>سبب المصروف</label>
+      <input id="expenseReason" placeholder="مثلاً: كهرباء أو مواصلات">
+      <p><button onclick="addExpense()">حفظ المصروف</button></p>`)
+    +panel(`<h2>مصاريف اليوم: ${fmt(total)} جنيه</h2>`)
+    +(history?panel(`<h2>سجل المصاريف بالأيام</h2>`+
+      Object.values(groups).map(g=>`
+        <details style="margin:12px 0;padding:12px;border:1px solid #64748b;border-radius:10px">
+          <summary style="cursor:pointer">
+            ${esc(g.label)} — إجمالي المصاريف: ${fmt(g.total)} جنيه
+          </summary>
+          ${table(['التاريخ','المبلغ','السبب','المستخدم','إجراء'],
+            g.items.map(x=>tr([
+              esc(x.created_at),fmt(x.amount),esc(x.reason),
+              esc(x.worker_name||''),
+              `<button class="danger" onclick="deleteExpense(${x.id})">حذف</button>`
+            ])))}
+        </details>`).join('')):'');
+}
+
 
 else if(k==='stocktake')c.innerHTML=panel(`<h2>جرد وتعديل المخزون</h2><label>الصنف</label><select id="stockId">${products.map(p=>`<option value="${p.id}">${esc(p.name)} (${p.quantity})</option>`).join('')}</select><label>الكمية الصحيحة</label><input id="stockQty" type="number" value="0"><label>سبب التعديل</label><input id="stockReason"><p><button onclick="stocktake()">حفظ الجرد</button></p>`);
 else if(k==='reports'){const r=await api('reports');const d=await api('sales?mode=archive');c.innerHTML=panel(`<h2>أرشيف الأيام والشهور</h2>${table(['النوع','الاسم','بداية','نهاية'],r.periods.map(p=>tr([p.kind==='day'?'يوم':'شهر',esc(p.label),esc(p.opened_at),esc(p.closed_at||'مفتوح')])))}`)+panel(`<h2>بحث في كل المبيعات</h2><input id="reportFilter" placeholder="ابحث بالمنتج أو التاريخ أو العامل" oninput="filterReport()"><div id="reportTable"></div>`);window.reportItems=d.items;filterReport()}
