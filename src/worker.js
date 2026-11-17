@@ -104,7 +104,21 @@ if(path==='/api/expenses'&&req.method==='POST'){
   return json({ok:true,id:r.meta.last_row_id});
 }
 
-if(path==='/api/expenses'&&req.method==='GET'){
+
+if(path==='/api/expenses/history'&&req.method==='GET'){
+  if(!manager)return fail('للمدير فقط',403);
+  const items=(await db.prepare(`
+    SELECT e.*,u.display_name AS worker_name,p.label AS day_label
+    FROM expenses e
+    LEFT JOIN users u ON u.id=e.user_id
+    LEFT JOIN periods p ON p.id=e.day_id
+    WHERE e.deleted_at IS NULL
+    ORDER BY e.day_id DESC,e.id DESC
+  `).all()).results;
+  return json({ok:true,items});
+}
+
+  if(path==='/api/expenses'&&req.method==='GET'){
   const p=await openPeriods(db);
   const mode=url.searchParams.get('mode')||'day';
   if(mode==='month'&&!manager)return fail('للمدير فقط',403);
